@@ -1,0 +1,143 @@
+{
+  "name": "SOAR - AI Threat Analyzer & Auto-Block",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "wazuh-alert",
+        "options": {}
+      },
+      "name": "Wazuh Webhook",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 1,
+      "position": [320, 300]
+    },
+    {
+      "parameters": {
+        "url": "http://ollama:11434/api/chat",
+        "method": "POST",
+        "jsonBody": {
+          "model": "llama3.1:8b",
+          "messages": [
+            {
+              "role": "system",
+              "content": "You are a SOC Analyst AI. Analyze security logs. Output ONLY JSON: {\"action\":\"block\"|\"alert\"|\"ignore\", \"risk\": 0-100, \"reason\": \"short explanation\"}"
+            },
+            {
+              "role": "user",
+              "content": "Alert Data: {{ $json.alert.data }}"
+            }
+          ],
+          "stream": false,
+          "format": "json"
+        },
+        "options": {
+          "response": {
+            "responseFormat": "json"
+          }
+        }
+      },
+      "name": "Analyze with AI (Ollama)",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 3,
+      "position": [540, 300]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "string": [
+            {
+              "value1": "={{ $json.message.content.action }}",
+              "operation": "equal",
+              "value2": "block"
+            }
+          ]
+        }
+      },
+      "name": "Decision Logic",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 1,
+      "position": [760, 300]
+    },
+    {
+      "parameters": {
+        "url": "http://localhost:55000/active-response",
+        "method": "POST",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpBasicAuth",
+        "body": {
+          "command": "firewall-drop",
+          "arguments": ["{{ $json.alert.data.srcip }}"],
+          "location": "all"
+        },
+        "options": {}
+      },
+      "name": "Execute Block (Wazuh API)",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 3,
+      "position": [1000, 150],
+      "credentials": {
+        "httpBasicAuth": {
+          "id": "1",
+          "name": "Wazuh API Creds"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "text": "🚨 BLOCKED: IP {{ $json.alert.data.srcip }} blocked by AI. Risk: {{ $json.message.content.risk }}"
+      },
+      "name": "Send Mattermost Alert",
+      "type": "n8n-nodes-base.mattermost",
+      "typeVersion": 1,
+      "position": [1220, 150]
+    }
+  ],
+  "connections": {
+    "Wazuh Webhook": {
+      "main": [
+        [
+          {
+            "node": "Analyze with AI (Ollama)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Analyze with AI (Ollama)": {
+      "main": [
+        [
+          {
+            "node": "Decision Logic",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Decision Logic": {
+      "main": [
+        [
+          {
+            "node": "Execute Block (Wazuh API)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Execute Block (Wazuh API)": {
+      "main": [
+        [
+          {
+            "node": "Send Mattermost Alert",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "pinData": {}
+}

@@ -1,0 +1,9 @@
+open-source-soar-stack/
+├── README.md                   📘 Dokumentasi lengkap
+├── docker-compose.yml          🐳 Stack Docker (n8n, Ollama, Mattermost, Nginx)
+├── .env.example                🔑 Template variabel lingkungan
+├── setup.sh                    🚀 Skrip instalasi otomatis (Generate .env & Nginx)
+├── wazuh-integration/
+│   └── custom-n8n.py           🛡️ Skrip integrasi Wazuh → n8n Webhook
+└── workflows/
+    └── soar-ai-analyzer.json   🧠 Workflow n8n siap import
