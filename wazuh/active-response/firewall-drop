@@ -1,0 +1,52 @@
+#!/bin/bash
+# Wazuh Active Response: Block IP on OPNsense via API
+# Place in /var/ossec/active-response/bin/firewall-drop
+# Make executable: chmod +x firewall-drop
+
+# Configuration
+OPNSENSE_HOST="firewall.yourdomain.com"
+OPNSENSE_API_KEY="${OPNSENSE_API_KEY}"
+OPNSENSE_API_SECRET="${OPNSENSE_API_SECRET}"
+
+# Read input
+read -r ALERT_JSON
+
+# Extract source IP
+SRC_IP=$(echo "$ALERT_JSON" | jq -r '.data.srcip // .data.source.ip // empty')
+if [ -z "$SRC_IP" ] || [ "$SRC_IP" = "unknown" ] || [ "$SRC_IP" = "null" ]; then
+    echo "No source IP found in alert"
+    exit 0
+fi
+
+# Skip RFC1918 and localhost
+if [[ "$SRC_IP" =~ ^10\. ]] || [[ "$SRC_IP" =~ ^172\.(1[6-9]|2[0-9]|3[0-1])\. ]] || [[ "$SRC_IP" =~ ^192\.168\. ]] || [[ "$SRC_IP" =~ ^127\. ]] || [[ "$SRC_IP" =~ ^169\.254\. ]]; then
+    echo "Skipping private/reserved IP: $SRC_IP"
+    exit 0
+fi
+
+# Check if already blocked
+CHECK_RESPONSE=$(curl -s -k -u "$OPNSENSE_API_KEY:$OPNSENSE_API_SECRET" \
+  "https://$OPNSENSE_HOST/api/firewall/alias/getItem/wazuh_blocked" \
+  --max-time 10)
+
+if echo "$CHECK_RESPONSE" | jq -e ".row.content | index(\"$SRC_IP\")" > /dev/null; then
+    echo "IP $SRC_IP already blocked"
+    exit 0
+fi
+
+# Add to alias
+ADD_RESPONSE=$(curl -s -k -u "$OPNSENSE_API_KEY:$OPNSENSE_API_SECRET" \
+  -X POST "https://$OPNSENSE_HOST/api/firewall/alias/addItem/wazuh_blocked" \
+  -H "Content-Type: application/json" \
+  -d "{\"address\": \"$SRC_IP\", \"description\": \"Wazuh auto-block $(date -Iseconds)\"}" \
+  --max-time 10)
+
+# Apply firewall changes
+curl -s -k -u "$OPNSENSE_API_KEY:$OPNSENSE_API_SECRET" \
+  -X POST "https://$OPNSENSE_HOST/api/firewall/service/reconfigure" \
+  --max-time 30 \
+  -o /dev/null
+
+echo "Blocked IP: $SRC_IP"
+logger -t wazuh-active-response "Blocked IP $SRC_IP via OPNsense API"
+exit 0

@@ -1,0 +1,97 @@
+version: '3.8'
+
+services:
+  misp:
+    image: docker.misp-project.org/misp-docker/core:latest
+    container_name: soar-misp
+    environment:
+      - MYSQL_HOST=db
+      - MYSQL_DATABASE=misp
+      - MYSQL_USER=misp
+      - MYSQL_PASSWORD=${MISP_DB_PASSWORD}
+      - POSTFIX_RELAY_HOST=${SMTP_HOST}
+      - POSTFIX_RELAY_PORT=${SMTP_PORT}
+      - POSTFIX_SASL_USER=${SMTP_USER}
+      - POSTFIX_SASL_PASSWORD=${SMTP_PASSWORD}
+      - BASE_URL=https://misp.yourdomain.com
+      - ADMIN_EMAIL=admin@yourdomain.com
+      - ADMIN_PASSPHRASE=${MISP_ADMIN_PASSWORD}
+      - GNUPG_EMAIL=admin@yourdomain.com
+      - GNUPG_PASSPHRASE=${MISP_GPG_PASSWORD}
+      - REDIS_HOST=redis
+      - REDIS_PORT=6379
+      - REDIS_DATABASE=0
+      - REDIS_PASSWORD=${REDIS_PASSWORD}
+      - MISP_MODULES_URL=http://misp-modules:6666
+    volumes:
+      - misp-data:/var/www/MISP/app/files
+      - misp-backup:/var/backups
+      - ./config.php:/var/www/MISP/app/Plugin/CakeResque/Config/config.php:ro
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      misp-modules:
+        condition: service_started
+    networks:
+      - soar-net
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.misp.rule=Host(`misp.yourdomain.com`)"
+      - "traefik.http.routers.misp.entrypoints=websecure"
+      - "traefik.http.routers.misp.tls.certresolver=letsencrypt"
+      - "traefik.http.services.misp.loadbalancer.server.port=80"
+    restart: unless-stopped
+
+  misp-modules:
+    image: docker.misp-project.org/misp-docker/modules:latest
+    container_name: soar-misp-modules
+    networks:
+      - soar-net
+    restart: unless-stopped
+
+  db:
+    image: mariadb:10.11
+    container_name: soar-misp-db
+    environment:
+      - MYSQL_ROOT_PASSWORD=${MYSQL_ROOT_PASSWORD}
+      - MYSQL_DATABASE=misp
+      - MYSQL_USER=misp
+      - MYSQL_PASSWORD=${MISP_DB_PASSWORD}
+    volumes:
+      - db-data:/var/lib/mysql
+    networks:
+      - soar-net
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+    restart: unless-stopped
+    command: --max-connections=500 --innodb-buffer-pool-size=1G
+
+  redis:
+    image: redis:7-alpine
+    container_name: soar-misp-redis
+    command: redis-server --requirepass ${REDIS_PASSWORD} --maxmemory 512mb --maxmemory-policy allkeys-lru
+    volumes:
+      - redis-data:/data
+    networks:
+      - soar-net
+    healthcheck:
+      test: ["CMD", "redis-cli", "-a", "${REDIS_PASSWORD}", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+
+volumes:
+  misp-data:
+  misp-backup:
+  db-data:
+  redis-data:
+
+networks:
+  soar-net:
+    external: true

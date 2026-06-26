@@ -1,0 +1,125 @@
+version: '3.8'
+
+services:
+  wazuh.indexer:
+    image: wazuh/wazuh-indexer:4.7.0
+    container_name: soar-wazuh-indexer
+    environment:
+      - INDEXER_PASSWORD=${WAZUH_INDEXER_PASSWORD}
+      - OPENSEARCH_JAVA_OPTS=-Xms2g -Xmx2g
+    volumes:
+      - wazuh-indexer-data:/var/lib/wazuh-indexer
+      - wazuh-indexer-logs:/var/log/wazuh-indexer
+      - ./config/indexer.yml:/usr/share/wazuh-indexer/config/opensearch.yml:ro
+    networks:
+      - soar-net
+    ulimits:
+      memlock:
+        soft: -1
+        hard: -1
+      nofile:
+        soft: 65536
+        hard: 65536
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "curl -k -u admin:${WAZUH_INDEXER_PASSWORD} https://localhost:9200/_cluster/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 10
+
+  wazuh.manager:
+    image: wazuh/wazuh-manager:4.7.0
+    container_name: soar-wazuh-manager
+    environment:
+      - INDEXER_URL=https://wazuh.indexer:9200
+      - INDEXER_PASSWORD=${WAZUH_INDEXER_PASSWORD}
+      - FILEBEAT_SSL_VERIFICATION_MODE=none
+      - MANAGER_PASSWORD=${WAZUH_MANAGER_PASSWORD}
+      - API_USER=wazuh
+      - API_PASSWORD=${WAZUH_API_PASSWORD}
+      - REGISTRATION_PASSWORD=${WAZUH_REGISTRATION_PASSWORD}
+      - ENABLE_SYSLOG=true
+      - SYSLOG_PORT=514
+    volumes:
+      - wazuh-manager-data:/var/ossec/data
+      - wazuh-manager-logs:/var/ossec/logs
+      - wazuh-manager-etc:/var/ossec/etc
+      - wazuh-manager-queue:/var/ossec/queue
+      - ./config/ossec.conf:/wazuh-config/ossec.conf:ro
+      - ./config/local_internal_options.conf:/wazuh-config/local_internal_options.conf:ro
+      - ./active-response:/var/ossec/active-response/bin:ro
+    ports:
+      - "1514:1514"
+      - "1515:1515"
+      - "514:514/udp"
+      - "55000:55000"
+    depends_on:
+      wazuh.indexer:
+        condition: service_healthy
+    networks:
+      - soar-net
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "/var/ossec/bin/wazuh-control", "status"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+
+  wazuh.dashboard:
+    image: wazuh/wazuh-dashboard:4.7.0
+    container_name: soar-wazuh-dashboard
+    environment:
+      - INDEXER_URL=https://wazuh.indexer:9200
+      - INDEXER_PASSWORD=${WAZUH_INDEXER_PASSWORD}
+      - MANAGER_URL=https://wazuh.manager
+      - MANAGER_USER=wazuh
+      - MANAGER_PASSWORD=${WAZUH_API_PASSWORD}
+      - DASHBOARD_PASSWORD=${WAZUH_DASHBOARD_PASSWORD}
+    volumes:
+      - wazuh-dashboard-data:/usr/share/wazuh-dashboard/data
+    ports:
+      - "5601:5601"
+    depends_on:
+      - wazuh.manager
+      - wazuh.indexer
+    networks:
+      - soar-net
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.wazuh.rule=Host(`wazuh.yourdomain.com`)"
+      - "traefik.http.routers.wazuh.entrypoints=websecure"
+      - "traefik.http.routers.wazuh.tls.certresolver=letsencrypt"
+      - "traefik.http.services.wazuh.loadbalancer.server.port=5601"
+    restart: unless-stopped
+
+  wazuh.filebeat:
+    image: wazuh/wazuh-filebeat:4.7.0
+    container_name: soar-wazuh-filebeat
+    environment:
+      - INDEXER_URL=https://wazuh.indexer:9200
+      - INDEXER_PASSWORD=${WAZUH_INDEXER_PASSWORD}
+      - FILEBEAT_SSL_VERIFICATION_MODE=none
+      - MANAGER_URL=https://wazuh.manager
+    volumes:
+      - wazuh-filebeat-data:/usr/share/filebeat/data
+      - ./config/filebeat.yml:/usr/share/filebeat/filebeat.yml:ro
+    depends_on:
+      - wazuh.manager
+      - wazuh.indexer
+    networks:
+      - soar-net
+    restart: unless-stopped
+
+volumes:
+  wazuh-indexer-data:
+  wazuh-indexer-logs:
+  wazuh-manager-data:
+  wazuh-manager-logs:
+  wazuh-manager-etc:
+  wazuh-manager-queue:
+  wazuh-dashboard-data:
+  wazuh-filebeat-data:
+
+networks:
+  soar-net:
+    external: true

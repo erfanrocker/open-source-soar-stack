@@ -1,0 +1,62 @@
+#!/bin/bash
+# Wazuh Active Response Script: Send alert to n8n webhook
+# Place in /var/ossec/active-response/bin/n8n-webhook
+# Make executable: chmod +x n8n-webhook
+
+# Configuration
+N8N_WEBHOOK_URL="https://n8n.yourdomain.com/webhook/wazuh-alert"
+N8N_API_KEY="${N8N_API_KEY}"
+
+# Read input from stdin (Wazuh passes JSON alert)
+read -r ALERT_JSON
+
+# Extract key fields for n8n
+ALERT_LEVEL=$(echo "$ALERT_JSON" | jq -r '.rule.level // 0')
+RULE_ID=$(echo "$ALERT_JSON" | jq -r '.rule.id // "unknown"')
+RULE_DESC=$(echo "$ALERT_JSON" | jq -r '.rule.description // "No description"')
+AGENT_ID=$(echo "$ALERT_JSON" | jq -r '.agent.id // "unknown"')
+AGENT_NAME=$(echo "$ALERT_JSON" | jq -r '.agent.name // "unknown"')
+AGENT_IP=$(echo "$ALERT_JSON" | jq -r '.agent.ip // "unknown"')
+SRC_IP=$(echo "$ALERT_JSON" | jq -r '.data.srcip // .data.source.ip // "unknown"')
+DST_IP=$(echo "$ALERT_JSON" | jq -r '.data.dstip // .data.destination.ip // "unknown"')
+TIMESTAMP=$(echo "$ALERT_JSON" | jq -r '.timestamp // now | tostring')
+
+# Build enriched payload
+PAYLOAD=$(jq -n \
+  --argjson alert "$ALERT_JSON" \
+  --arg level "$ALERT_LEVEL" \
+  --arg rule_id "$RULE_ID" \
+  --arg rule_desc "$RULE_DESC" \
+  --arg agent_id "$AGENT_ID" \
+  --arg agent_name "$AGENT_NAME" \
+  --arg agent_ip "$AGENT_IP" \
+  --arg src_ip "$SRC_IP" \
+  --arg dst_ip "$DST_IP" \
+  --arg timestamp "$TIMESTAMP" \
+  '{
+    alert: $alert,
+    enriched: {
+      level: ($level | tonumber),
+      rule_id: $rule_id,
+      rule_description: $rule_desc,
+      agent_id: $agent_id,
+      agent_name: $agent_name,
+      agent_ip: $agent_ip,
+      source_ip: $src_ip,
+      destination_ip: $dst_ip,
+      timestamp: $timestamp,
+      severity: (if ($level | tonumber) >= 12 then "critical" elif ($level | tonumber) >= 7 then "high" elif ($level | tonumber) >= 4 then "medium" else "low" end)
+    }
+  }')
+
+# Send to n8n
+curl -s -X POST "$N8N_WEBHOOK_URL" \
+  -H "Content-Type: application/json" \
+  -H "X-Wazuh-Auth: $N8N_API_KEY" \
+  -d "$PAYLOAD" \
+  --max-time 10 \
+  --retry 2 \
+  --retry-delay 2 \
+  -o /dev/null
+
+exit 0

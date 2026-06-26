@@ -1,0 +1,32 @@
+#!/bin/bash
+# Wazuh Active Response: Unblock IP on OPNsense (for timeout)
+# Place in /var/ossec/active-response/bin/firewall-unblock
+# Make executable: chmod +x firewall-unblock
+
+OPNSENSE_HOST="firewall.yourdomain.com"
+OPNSENSE_API_KEY="${OPNSENSE_API_KEY}"
+OPNSENSE_API_SECRET="${OPNSENSE_API_SECRET}"
+
+read -r ALERT_JSON
+
+SRC_IP=$(echo "$ALERT_JSON" | jq -r '.data.srcip // .data.source.ip // empty')
+if [ -z "$SRC_IP" ] || [ "$SRC_IP" = "unknown" ] || [ "$SRC_IP" = "null" ]; then
+    exit 0
+fi
+
+# Remove from alias
+curl -s -k -u "$OPNSENSE_API_KEY:$OPNSENSE_API_SECRET" \
+  -X POST "https://$OPNSENSE_HOST/api/firewall/alias/delItem/wazuh_blocked" \
+  -H "Content-Type: application/json" \
+  -d "{\"address\": \"$SRC_IP\"}" \
+  --max-time 10
+
+# Apply firewall changes
+curl -s -k -u "$OPNSENSE_API_KEY:$OPNSENSE_API_SECRET" \
+  -X POST "https://$OPNSENSE_HOST/api/firewall/service/reconfigure" \
+  --max-time 30 \
+  -o /dev/null
+
+echo "Unblocked IP: $SRC_IP"
+logger -t wazuh-active-response "Unblocked IP $SRC_IP via OPNsense API"
+exit 0

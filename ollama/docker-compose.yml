@@ -1,0 +1,63 @@
+version: '3.8'
+
+services:
+  ollama:
+    image: ollama/ollama:latest
+    container_name: soar-ollama
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+    environment:
+      - OLLAMA_HOST=0.0.0.0:11434
+      - OLLAMA_ORIGINS=*
+      - OLLAMA_NUM_PARALLEL=4
+      - OLLAMA_MAX_LOADED_MODELS=2
+    volumes:
+      - ollama-data:/root/.ollama
+    networks:
+      - soar-net
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.ollama.rule=Host(`ollama.yourdomain.com`)"
+      - "traefik.http.routers.ollama.entrypoints=websecure"
+      - "traefik.http.routers.ollama.tls.certresolver=letsencrypt"
+      - "traefik.http.services.ollama.loadbalancer.server.port=11434"
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:11434/api/tags"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  openclaw:
+    image: ghcr.io/openclaw/openclaw:latest
+    container_name: soar-openclaw
+    environment:
+      - OLLAMA_BASE_URL=http://ollama:11434
+      - DEFAULT_MODEL=llama3:70b
+      - LOG_LEVEL=INFO
+      - API_HOST=0.0.0.0
+      - API_PORT=8000
+    depends_on:
+      ollama:
+        condition: service_healthy
+    networks:
+      - soar-net
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.openclaw.rule=Host(`ai.yourdomain.com`)"
+      - "traefik.http.routers.openclaw.entrypoints=websecure"
+      - "traefik.http.routers.openclaw.tls.certresolver=letsencrypt"
+      - "traefik.http.services.openclaw.loadbalancer.server.port=8000"
+    restart: unless-stopped
+
+volumes:
+  ollama-data:
+
+networks:
+  soar-net:
+    external: true

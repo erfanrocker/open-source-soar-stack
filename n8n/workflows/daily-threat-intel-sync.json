@@ -1,0 +1,274 @@
+{
+  "name": "Daily Threat Intel Sync",
+  "nodes": [
+    {
+      "parameters": {
+        "triggerTimes": {
+          "item": [
+            {
+              "hour": 2,
+              "minute": 0
+            }
+          ]
+        }
+      },
+      "id": "cron-daily",
+      "name": "Daily at 2AM",
+      "type": "n8n-nodes-base.cron",
+      "typeVersion": 1,
+      "position": [250, 300]
+    },
+    {
+      "parameters": {
+        "url": "https://misp.yourdomain.com/feeds/fetchFromAllFeeds",
+        "method": "POST",
+        "jsonParameters": true,
+        "options": {},
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Authorization",
+              "value": "Bearer {{ $credentials.mispApiKey }}"
+            },
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        }
+      },
+      "id": "misp-fetch-feeds",
+      "name": "Fetch MISP Feeds",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 2,
+      "position": [500, 200],
+      "credentials": {
+        "httpApi": "misp-api"
+      }
+    },
+    {
+      "parameters": {
+        "url": "https://misp.yourdomain.com/attributes/restSearch",
+        "method": "POST",
+        "jsonParameters": true,
+        "options": {},
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Authorization",
+              "value": "Bearer {{ $credentials.mispApiKey }}"
+            },
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "bodyParametersJson": "={\n  \"returnFormat\": \"json\",\n  \"type\": \"ip-src\",\n  \"tags\": \"malware,c2,botnet\",\n  \"limit\": 1000,\n  \"includeContext\": true\n}"
+      },
+      "id": "misp-get-malicious-ips",
+      "name": "Get Malicious IPs",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 2,
+      "position": [500, 400],
+      "credentials": {
+        "httpApi": "misp-api"
+      }
+    },
+    {
+      "parameters": {
+        "functionCode": "const response = items[0].json;\nconst ips = [];\n\nif (response.response?.Attribute) {\n  response.response.Attribute.forEach(attr => {\n    if (attr.type === 'ip-src' || attr.type === 'ip-dst') {\n      ips.push({\n        ip: attr.value,\n        tags: attr.Tag?.map(t => t.name) || [],\n        comment: attr.comment,\n        first_seen: attr.first_seen,\n        last_seen: attr.last_seen\n      });\n    }\n  });\n}\n\n// Deduplicate\nconst unique = [...new Map(ips.map(i => [i.ip, i])).values()];\n\nreturn [{ json: { ips: unique, count: unique.length, timestamp: new Date().toISOString() } }];"
+      },
+      "id": "process-ips",
+      "name": "Process IPs",
+      "type": "n8n-nodes-base.function",
+      "typeVersion": 1,
+      "position": [750, 400]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "string": [
+            {
+              "value1": "={{ $json.count }}",
+              "operation": "gt",
+              "value2": "0"
+            }
+          ]
+        }
+      },
+      "id": "check-ips",
+      "name": "Has IPs?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 1,
+      "position": [1000, 400]
+    },
+    {
+      "parameters": {
+        "url": "https://firewall.yourdomain.com/api/firewall/alias/set/wazuh_threat_intel",
+        "method": "POST",
+        "jsonParameters": true,
+        "options": {},
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "authentication": "none",
+        "headerParametersJson": "={\n  \"Authorization\": \"Basic {{ $credentials.opnsenseAuth }}\"\n}",
+        "bodyParametersJson": "={\n  \"name\": \"wazuh_threat_intel\",\n  \"type\": \"host\",\n  \"content\": \"{{ $json.ips.map(i => i.ip).join('\\n') }}\",\n  \"description\": \"MISP threat intelligence feed - updated {{ $now.format('YYYY-MM-DD HH:mm') }}\"\n}"
+      },
+      "id": "update-opnsense-alias",
+      "name": "Update OPNsense Alias",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 2,
+      "position": [1250, 300],
+      "credentials": {
+        "httpApi": "opnsense-api"
+      }
+    },
+    {
+      "parameters": {
+        "url": "https://firewall.yourdomain.com/api/firewall/service/reconfigure",
+        "method": "POST",
+        "options": {},
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "authentication": "none",
+        "headerParametersJson": "={\n  \"Authorization\": \"Basic {{ $credentials.opnsenseAuth }}\"\n}"
+      },
+      "id": "apply-firewall-2",
+      "name": "Apply Firewall Changes",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 2,
+      "position": [1500, 300],
+      "credentials": {
+        "httpApi": "opnsense-api"
+      }
+    },
+    {
+      "parameters": {
+        "url": "https://chat.yourdomain.com/hooks/{{ $credentials.mattermostWebhookId }}",
+        "method": "POST",
+        "jsonParameters": true,
+        "options": {},
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "bodyParametersJson": "={\n  \"channel\": \"#security-intel\",\n  \"username\": \"Threat Intel Bot\",\n  \"icon_emoji\": \":shield:\",\n  \"text\": \"**Daily Threat Intel Sync Complete**\n\n- **Malicious IPs fetched:** {{ $json.count }}\n- **OPNsense alias updated:** wazuh_threat_intel\n- **Timestamp:** {{ $json.timestamp }}\n\nTop tags: {{ $json.ips.slice(0, 10).flatMap(i => i.tags).filter((v, i, a) => a.indexOf(v) === i).join(', ') }}\"\n}"
+      },
+      "id": "mattermost-intel",
+      "name": "Mattermost Notify",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 2,
+      "position": [1250, 500],
+      "credentials": {
+        "httpApi": "mattermost-webhook"
+      }
+    }
+  ],
+  "connections": {
+    "Daily at 2AM": {
+      "main": [
+        [
+          {
+            "node": "Fetch MISP Feeds",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Get Malicious IPs",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Fetch MISP Feeds": {
+      "main": [
+        [
+          {
+            "node": "Process IPs",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Get Malicious IPs": {
+      "main": [
+        [
+          {
+            "node": "Process IPs",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Process IPs": {
+      "main": [
+        [
+          {
+            "node": "Has IPs?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Has IPs?": {
+      "main": [
+        [
+          {
+            "node": "Update OPNsense Alias",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Mattermost Notify",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Mattermost Notify",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Update OPNsense Alias": {
+      "main": [
+        [
+          {
+            "node": "Apply Firewall Changes",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "id": "2"
+}

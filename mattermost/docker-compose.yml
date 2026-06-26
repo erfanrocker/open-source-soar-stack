@@ -1,0 +1,83 @@
+version: '3.8'
+
+services:
+  mattermost:
+    image: mattermost/mattermost-team-edition:latest
+    container_name: soar-mattermost
+    environment:
+      - MM_SQLSETTINGS_DRIVERNAME=postgres
+      - MM_SQLSETTINGS_DATASOURCE=postgres://mmuser:${MATTERMOST_DB_PASSWORD}@postgres:5432/mattermost?sslmode=disable&connect_timeout=10
+      - MM_SITEURL=https://chat.yourdomain.com
+      - MM_SERVICESETTINGS_SITEURL=https://chat.yourdomain.com
+      - MM_SERVICESETTINGS_ENABLEINCOMINGWEBHOOKS=true
+      - MM_SERVICESETTINGS_ENABLEOUTGOINGWEBHOOKS=true
+      - MM_SERVICESETTINGS_ENABLEPOSTUSERNAMEOVERRIDE=true
+      - MM_SERVICESETTINGS_ENABLEPOSTICONOVERRIDE=true
+      - MM_SERVICESETTINGS_ALLOWCORS=true
+      - MM_SERVICESETTINGS_CORSALLOWEDORIGINS=*
+      - MM_FILESETTINGS_DRIVERNAME=local
+      - MM_FILESETTINGS_DIRECTORY=/mattermost/data
+      - MM_EMAILSETTINGS_ENABLESIGNUPWITHEMAIL=true
+      - MM_EMAILSETTINGS_ENABLESIGNUPWITHGITLAB=false
+      - MM_EMAILSETTINGS_ENABLESIGNUPWITHGOOGLE=false
+      - MM_EMAILSETTINGS_ENABLESIGNUPWITHOFFICE365=false
+      - MM_EMAILSETTINGS_SENDEMAILNOTIFICATIONS=true
+      - MM_EMAILSETTINGS_SMTPUSERNAME=${SMTP_USER}
+      - MM_EMAILSETTINGS_SMTPPASSWORD=${SMTP_PASSWORD}
+      - MM_EMAILSETTINGS_SMTPSERVER=${SMTP_HOST}
+      - MM_EMAILSETTINGS_SMTPPORT=${SMTP_PORT}
+      - MM_EMAILSETTINGS_CONNECTIONSECURITY=STARTTLS
+      - MM_EMAILSETTINGS_FEEDBACKNAME=SOAR Stack
+      - MM_EMAILSETTINGS_FEEDBACKEMAIL=admin@yourdomain.com
+      - MM_EMAILSETTINGS_SMTPHELLO=yourdomain.com
+      - MM_LOGSETTINGS_CONSOLELEVEL=INFO
+      - MM_LOGSETTINGS_FILELEVEL=INFO
+      - MM_PLUGINSETTINGS_ENABLE=true
+      - MM_PLUGINSETTINGS_ENABLEMARKETPLACE=true
+      - MM_PLUGINSETTINGS_REQUIRESIGNATURE=false
+    volumes:
+      - mattermost-data:/mattermost/data
+      - mattermost-logs:/mattermost/logs
+      - mattermost-plugins:/mattermost/plugins
+      - mattermost-client-plugins:/mattermost/client/plugins
+    depends_on:
+      postgres:
+        condition: service_healthy
+    networks:
+      - soar-net
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.mattermost.rule=Host(`chat.yourdomain.com`)"
+      - "traefik.http.routers.mattermost.entrypoints=websecure"
+      - "traefik.http.routers.mattermost.tls.certresolver=letsencrypt"
+      - "traefik.http.services.mattermost.loadbalancer.server.port=8065"
+    restart: unless-stopped
+
+  postgres:
+    image: postgres:16-alpine
+    container_name: soar-mattermost-postgres
+    environment:
+      - POSTGRES_DB=mattermost
+      - POSTGRES_USER=mmuser
+      - POSTGRES_PASSWORD=${MATTERMOST_DB_PASSWORD}
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    networks:
+      - soar-net
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U mmuser -d mattermost"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+
+volumes:
+  mattermost-data:
+  mattermost-logs:
+  mattermost-plugins:
+  mattermost-client-plugins:
+  postgres-data:
+
+networks:
+  soar-net:
+    external: true

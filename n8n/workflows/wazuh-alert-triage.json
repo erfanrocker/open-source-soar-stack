@@ -1,0 +1,427 @@
+{
+  "name": "Wazuh Alert - Triage & Response",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "wazuh-alert",
+        "responseMode": "responseNode",
+        "options": {}
+      },
+      "id": "webhook-wazuh",
+      "name": "Wazuh Webhook",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 1,
+      "position": [250, 300],
+      "webhookId": "wazuh-alert"
+    },
+    {
+      "parameters": {
+        "functionCode": "const alert = items[0].json;\nconst enriched = alert.enriched || {};\nconst level = enriched.level || 0;\n\n// Determine severity\nlet severity = 'low';\nif (level >= 12) severity = 'critical';\nelse if (level >= 7) severity = 'high';\nelse if (level >= 4) severity = 'medium';\n\n// Extract IOCs\nconst iocs = {\n  ips: [],\n  domains: [],\n  hashes: [],\n  urls: []\n};\n\nconst fullLog = alert.alert?.full_log || '';\nconst srcIp = enriched.source_ip;\nconst dstIp = enriched.destination_ip;\n\nif (srcIp && srcIp !== 'unknown') iocs.ips.push(srcIp);\nif (dstIp && dstIp !== 'unknown') iocs.ips.push(dstIp);\n\n// Extract IPs from log\nconst ipRegex = /\\b(?:\\d{1,3}\\.){3}\\d{1,3}\\b/g;\nconst ips = fullLog.match(ipRegex) || [];\nips.forEach(ip => { if (!iocs.ips.includes(ip)) iocs.ips.push(ip); });\n\n// Extract domains\nconst domainRegex = /\\b[a-zA-Z0-9.-]+\\.[a-zA-Z]{2,}\\b/g;\nconst domains = fullLog.match(domainRegex) || [];\ndomains.forEach(d => { if (!iocs.domains.includes(d)) iocs.domains.push(d); });\n\n// Extract hashes (MD5, SHA1, SHA256)\nconst hashRegex = /\\b[a-fA-F0-9]{32,64}\\b/g;\nconst hashes = fullLog.match(hashRegex) || [];\nhashes.forEach(h => { if (!iocs.hashes.includes(h)) iocs.hashes.push(h); });\n\nreturn [{\n  json: {\n    ...alert,\n    enriched: {\n      ...enriched,\n      severity,\n      iocs\n    }\n  }\n}];"
+      },
+      "id": "enrich-alert",
+      "name": "Enrich Alert",
+      "type": "n8n-nodes-base.function",
+      "typeVersion": 1,
+      "position": [500, 300]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "string": [
+            {
+              "value1": "={{ $json.enriched.severity }}",
+              "operation": "in",
+              "value2": "critical,high"
+            }
+          ]
+        }
+      },
+      "id": "check-severity",
+      "name": "High/Critical?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 1,
+      "position": [750, 300]
+    },
+    {
+      "parameters": {
+        "url": "http://ai.yourdomain.com/v1/analyze",
+        "method": "POST",
+        "jsonParameters": true,
+        "options": {},
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "bodyParametersJson": "={\n  \"alert\": {{\n    \"rule_id\": \"{{ $json.enriched.rule_id }}\",\n    \"rule_description\": \"{{ $json.enriched.rule_description }}\",\n    \"level\": {{ $json.enriched.level }},\n    \"severity\": \"{{ $json.enriched.severity }}\",\n    \"agent_name\": \"{{ $json.enriched.agent_name }}\",\n    \"source_ip\": \"{{ $json.enriched.source_ip }}\",\n    \"destination_ip\": \"{{ $json.enriched.destination_ip }}\",\n    \"full_log\": \"{{ $json.alert.full_log }}\",\n    \"iocs\": {{ JSON.stringify($json.enriched.iocs) }}\n  }},\n  \"model\": \"llama3:70b\",\n  \"prompt_template\": \"security_analyst\"\n}"
+      },
+      "id": "openclaw-triage",
+      "name": "OpenClaw Triage",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 2,
+      "position": [1000, 200],
+      "credentials": {
+        "httpApi": "openclaw-api"
+      }
+    },
+    {
+      "parameters": {
+        "url": "https://misp.yourdomain.com/attributes/restSearch",
+        "method": "POST",
+        "jsonParameters": true,
+        "options": {},
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Authorization",
+              "value": "Bearer {{ $credentials.mispApiKey }}"
+            },
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            },
+            {
+              "name": "Accept",
+              "value": "application/json"
+            }
+          ]
+        },
+        "bodyParametersJson": "={\n  \"returnFormat\": \"json\",\n  \"value\": \"{{ $json.enriched.iocs.ips.join(' OR ') }}\",\n  \"type\": \"ip-src\",\n  \"includeContext\": true,\n  \"limit\": 10\n}"
+      },
+      "id": "misp-enrich-ip",
+      "name": "MISP Enrich IPs",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 2,
+      "position": [1000, 400],
+      "credentials": {
+        "httpApi": "misp-api"
+      }
+    },
+    {
+      "parameters": {
+        "functionCode": "const alert = items[0].json;\nconst openclaw = items[1]?.json || {};\nconst misp = items[2]?.json || {};\n\n// Build ticket description\nlet description = `**Wazuh Alert - ${alert.enriched.severity.toUpperCase()}**\n\n`;\ndescription += `**Rule:** ${alert.enriched.rule_description} (ID: ${alert.enriched.rule_id})\n`;\ndescription += `**Level:** ${alert.enriched.level}\n`;\ndescription += `**Agent:** ${alert.enriched.agent_name} (${alert.enriched.agent_ip})\n`;\ndescription += `**Source IP:** ${alert.enriched.source_ip}\n`;\ndescription += `**Destination IP:** ${alert.enriched.destination_ip}\n`;\ndescription += `**Time:** ${alert.enriched.timestamp}\n\n`;\n\nif (Object.keys(alert.enriched.iocs).some(k => alert.enriched.iocs[k].length > 0)) {\n  description += `**IOCs:**\n`;\n  if (alert.enriched.iocs.ips.length) description += `- IPs: ${alert.enriched.iocs.ips.join(', ')}\n`;\n  if (alert.enriched.iocs.domains.length) description += `- Domains: ${alert.enriched.iocs.domains.join(', ')}\n`;\n  if (alert.enriched.iocs.hashes.length) description += `- Hashes: ${alert.enriched.iocs.hashes.join(', ')}\n`;\n  description += `\n`;\n}\n\nif (openclaw.analysis) {\n  description += `**AI Analysis:**\n${openclaw.analysis}\n\n`;\n  description += `**Recommendation:** ${openclaw.recommendation}\n\n`;\n}\n\nif (misp.response?.Attribute?.length) {\n  description += `**MISP Matches:**\n`;\n  misp.response.Attribute.slice(0, 5).forEach(attr => {\n    description += `- ${attr.type}: ${attr.value} (${attr.category}) - ${attr.Tag?.map(t => t.name).join(', ') || 'no tags'}\n`;\n  });\n  description += `\n`;\n}\n\ndescription += `**Raw Log:**\n\`\`\`\n${alert.alert.full_log}\n\`\`\`\n`;\n\nreturn [{\n  json: {\n    ...alert,\n    ticket: {\n      title: `[${alert.enriched.severity.toUpperCase()}] ${alert.enriched.rule_description}`,\n      description,\n      priority: alert.enriched.severity === 'critical' ? '1' : alert.enriched.severity === 'high' ? '2' : '3',\n      tags: ['wazuh', 'security', alert.enriched.severity, `rule-${alert.enriched.rule_id}`]\n    }\n  }\n}];"
+      },
+      "id": "build-ticket",
+      "name": "Build Ticket",
+      "type": "n8n-nodes-base.function",
+      "typeVersion": 1,
+      "position": [1250, 300]
+    },
+    {
+      "parameters": {
+        "url": "https://zammad.yourdomain.com/api/v1/tickets",
+        "method": "POST",
+        "jsonParameters": true,
+        "options": {},
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Authorization",
+              "value": "Bearer {{ $credentials.zammadToken }}"
+            },
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "bodyParametersJson": "={\n  \"title\": \"{{ $json.ticket.title }}\",\n  \"group\": \"Security\",\n  \"priority\": \"{{ $json.ticket.priority }}\",\n  \"article\": {\n    \"subject\": \"{{ $json.ticket.title }}\",\n    \"body\": \"{{ $json.ticket.description }}\",\n    \"type\": \"note\",\n    \"internal\": false\n  },\n  \"tags\": {{ JSON.stringify($json.ticket.tags) }}\n}"
+      },
+      "id": "create-zammad-ticket",
+      "name": "Create Zammad Ticket",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 2,
+      "position": [1500, 200],
+      "credentials": {
+        "httpApi": "zammad-api"
+      }
+    },
+    {
+      "parameters": {
+        "url": "https://chat.yourdomain.com/hooks/{{ $credentials.mattermostWebhookId }}",
+        "method": "POST",
+        "jsonParameters": true,
+        "options": {},
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "bodyParametersJson": "={\n  \"channel\": \"#security-alerts\",\n  \"username\": \"SOAR Bot\",\n  \"icon_url\": \"https://raw.githubusercontent.com/wazuh/wazuh/main/assets/logo.png\",\n  \"attachments\": [\n    {\n      \"color\": \"{{ $json.enriched.severity === 'critical' ? '#ff0000' : $json.enriched.severity === 'high' ? '#ff6600' : $json.enriched.severity === 'medium' ? '#ffcc00' : '#36a64f' }}\",\n      \"title\": \"{{ $json.ticket.title }}\",\n      \"text\": \"{{ $json.ticket.description }}\",\n      \"fields\": [\n        {\n          \"title\": \"Severity\",\n          \"value\": \"{{ $json.enriched.severity.toUpperCase() }}\",\n          \"short\": true\n        },\n        {\n          \"title\": \"Rule ID\",\n          \"value\": \"{{ $json.enriched.rule_id }}\",\n          \"short\": true\n        },\n        {\n          \"title\": \"Agent\",\n          \"value\": \"{{ $json.enriched.agent_name }}\",\n          \"short\": true\n        },\n        {\n          \"title\": \"Source IP\",\n          \"value\": \"{{ $json.enriched.source_ip }}\",\n          \"short\": true\n        }\n      ],\n      \"ts\": {{ Math.floor(new Date($json.enriched.timestamp).getTime() / 1000) }},\n      \"actions\": [\n        {\n          \"name\": \"View Ticket\",\n          \"integration\": {\n            \"url\": \"https://zammad.yourdomain.com/ticket/{{ $json.ticket.id }}\"\n          }\n        }\n      ]\n    }\n  ]\n}"
+      },
+      "id": "mattermost-notify",
+      "name": "Mattermost Notify",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 2,
+      "position": [1500, 400],
+      "credentials": {
+        "httpApi": "mattermost-webhook"
+      }
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "string": [
+            {
+              "value1": "={{ $json.enriched.severity }}",
+              "operation": "equal",
+              "value2": "critical"
+            }
+          ]
+        }
+      },
+      "id": "check-critical",
+      "name": "Critical?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 1,
+      "position": [1750, 200]
+    },
+    {
+      "parameters": {
+        "url": "https://firewall.yourdomain.com/api/firewall/alias/addItem/wazuh_blocked",
+        "method": "POST",
+        "jsonParameters": true,
+        "options": {},
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "authentication": "none",
+        "headerParametersJson": "={\n  \"Authorization\": \"Basic {{ $credentials.opnsenseAuth }}\"\n}",
+        "bodyParametersJson": "={\n  \"address\": \"{{ $json.enriched.source_ip }}\",\n  \"description\": \"Wazuh auto-block critical alert {{ $json.enriched.rule_id }} at {{ $now.iso() }}\"\n}"
+      },
+      "id": "block-ip-opnsense",
+      "name": "Block IP (OPNsense)",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 2,
+      "position": [2000, 200],
+      "credentials": {
+        "httpApi": "opnsense-api"
+      }
+    },
+    {
+      "parameters": {
+        "url": "https://firewall.yourdomain.com/api/firewall/service/reconfigure",
+        "method": "POST",
+        "options": {},
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "authentication": "none",
+        "headerParametersJson": "={\n  \"Authorization\": \"Basic {{ $credentials.opnsenseAuth }}\"\n}"
+      },
+      "id": "apply-firewall",
+      "name": "Apply Firewall Changes",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 2,
+      "position": [2250, 200],
+      "credentials": {
+        "httpApi": "opnsense-api"
+      }
+    },
+    {
+      "parameters": {
+        "functionCode": "const alert = items[0].json;\n\n// Log for audit\nconsole.log(`[SOAR] Processed alert: ${alert.enriched.rule_id} - ${alert.enriched.severity} - ${alert.enriched.source_ip}`);\n\nreturn [{\n  json: {\n    status: 'completed',\n    alert_id: alert.enriched.rule_id,\n    severity: alert.enriched.severity,\n    source_ip: alert.enriched.source_ip,\n    ticket_created: !!items[1]?.json?.id,\n    blocked: alert.enriched.severity === 'critical',\n    timestamp: new Date().toISOString()\n  }\n}];"
+      },
+      "id": "audit-log",
+      "name": "Audit Log",
+      "type": "n8n-nodes-base.function",
+      "typeVersion": 1,
+      "position": [2000, 400]
+    },
+    {
+      "parameters": {
+        "options": {}
+      },
+      "id": "webhook-response",
+      "name": "Webhook Response",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1,
+      "position": [2250, 400]
+    }
+  ],
+  "connections": {
+    "Wazuh Webhook": {
+      "main": [
+        [
+          {
+            "node": "Enrich Alert",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Enrich Alert": {
+      "main": [
+        [
+          {
+            "node": "High/Critical?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "High/Critical?": {
+      "main": [
+        [
+          {
+            "node": "OpenClaw Triage",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "MISP Enrich IPs",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Build Ticket",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "OpenClaw Triage": {
+      "main": [
+        [
+          {
+            "node": "Build Ticket",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "MISP Enrich IPs": {
+      "main": [
+        [
+          {
+            "node": "Build Ticket",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build Ticket": {
+      "main": [
+        [
+          {
+            "node": "Create Zammad Ticket",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Mattermost Notify",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Critical?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Create Zammad Ticket": {
+      "main": [
+        [
+          {
+            "node": "Audit Log",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Mattermost Notify": {
+      "main": [
+        [
+          {
+            "node": "Audit Log",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Critical?": {
+      "main": [
+        [
+          {
+            "node": "Block IP (OPNsense)",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Audit Log",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Block IP (OPNsense)": {
+      "main": [
+        [
+          {
+            "node": "Apply Firewall Changes",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Apply Firewall Changes": {
+      "main": [
+        [
+          {
+            "node": "Audit Log",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Audit Log": {
+      "main": [
+        [
+          {
+            "node": "Webhook Response",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "id": "1"
+}
