@@ -32,7 +32,8 @@
    │   OPNsense       │
    │  (Firewall API)  │
    └──────────────────┘
-```
+<img width="2048" height="2048" alt="SOAR-diagram" src="https://github.com/user-attachments/assets/76ada855-8622-4eaf-9f9a-de5e14000cdc" />
+
 
 ## Services & Ports
 
